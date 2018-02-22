@@ -21,4 +21,11 @@
 
 #define BUF_SIZE 80
 
+struct listener_data {
+    struct ifaddrs my_addr;
+    int port;
+};
+
+enum role {SENDER, RECEIVER};
+
 #endif //H_CLIENT_LIB
