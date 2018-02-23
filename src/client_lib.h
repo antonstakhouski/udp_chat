@@ -1,6 +1,10 @@
 #ifndef H_CLIENT_LIB
 #define H_CLIENT_LIB
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,9 +15,9 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
-
-#include <arpa/inet.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+
 #include <net/if.h>
 #include <ifaddrs.h>
 
@@ -22,9 +26,15 @@
 #define BUF_SIZE 120
 #define MAX_USERS 20
 
+#define CHAT_GROUP "239.0.0.1"
+
+enum role {SENDER, RECEIVER};
+enum scope {BROADCAST_MODE, MULTICAST_MODE};
+
 struct listener_data {
     struct ifaddrs my_addr;
     int port;
+    enum scope my_scope;
 };
 
 struct user_data {
@@ -33,7 +43,5 @@ struct user_data {
     char nick[20];
     time_t timestamp;
 };
-
-enum role {SENDER, RECEIVER};
 
 #endif //H_CLIENT_LIB

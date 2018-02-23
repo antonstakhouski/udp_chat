@@ -81,14 +81,26 @@ int get_int_info(struct ifaddrs* my_addr, char* int_name)
 
 int init_socket(int* sd, const struct listener_data* data, enum role my_role)
 {
+    struct ip_mreq mreq;
     if ((*sd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("Error creating listening socket");
         exit(0);
     }
 
     int bcast = 1, reusep = 1, reusea = 1;
-    if (setsockopt(*sd, SOL_SOCKET, SO_BROADCAST, (char *)&bcast, sizeof(bcast)))
-        perror("Set socket options");
+    if (data->my_scope == BROADCAST_MODE) {
+        if (setsockopt(*sd, SOL_SOCKET, SO_BROADCAST, (char *)&bcast, sizeof(bcast)))
+            perror("Set socket options");
+    } else {
+        /* use setsockopt() to request that the kernel join a multicast group */
+        mreq.imr_multiaddr.s_addr = inet_addr(CHAT_GROUP);
+        mreq.imr_interface.s_addr =
+            (&((struct sockaddr_in*)data->my_addr.ifa_addr)->sin_addr)->s_addr;
+        if (setsockopt(*sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+            perror("setsockopt");
+            exit(1);
+        }
+    }
 
     if (setsockopt(*sd, SOL_SOCKET, SO_REUSEPORT, (char *)&reusep, sizeof(reusep)))
         perror("Set socket options");
@@ -101,9 +113,14 @@ int init_socket(int* sd, const struct listener_data* data, enum role my_role)
     serv_addr.sin_port = htons(data->port);
 
     if (my_role == RECEIVER) {
-        serv_addr.sin_family = data->my_addr.ifa_ifu.ifu_broadaddr->sa_family;
-        serv_addr.sin_addr.s_addr =
-            (&((struct sockaddr_in*)data->my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+        if (data->my_scope == BROADCAST_MODE) {
+            serv_addr.sin_family = data->my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+            serv_addr.sin_addr.s_addr =
+                (&((struct sockaddr_in*)data->my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+        } else {
+            serv_addr.sin_family = AF_INET;
+            serv_addr.sin_addr.s_addr = inet_addr(CHAT_GROUP);
+        }
     } else {
         serv_addr.sin_family = data->my_addr.ifa_addr->sa_family;
         serv_addr.sin_addr.s_addr =
@@ -143,10 +160,15 @@ void* listen_chat(void* arg)
     init_socket(&sending_socket, &data, SENDER);
 
     struct sockaddr_in target;
-    target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
     target.sin_port = htons(data.port);
-    target.sin_addr.s_addr =
-        (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    if (data.my_scope == BROADCAST_MODE) {
+        target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+        target.sin_addr.s_addr =
+            (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    } else {
+        target.sin_family = AF_INET;
+        target.sin_addr.s_addr = inet_addr(CHAT_GROUP);
+    }
     socklen_t targetlen = sizeof(struct sockaddr_in);
 
     pthread_mutex_lock(&lock);
@@ -220,10 +242,15 @@ void* do_ping(void* arg)
 
     int n;
     struct sockaddr_in target;
-    target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
     target.sin_port = htons(data.port);
-    target.sin_addr.s_addr =
-        (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    if (data.my_scope == BROADCAST_MODE) {
+        target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+        target.sin_addr.s_addr =
+            (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    } else {
+        target.sin_family = AF_INET;
+        target.sin_addr.s_addr = inet_addr(CHAT_GROUP);
+    }
     socklen_t targetlen = sizeof(struct sockaddr_in);
 
     char msg[30];
@@ -241,12 +268,21 @@ void* do_ping(void* arg)
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3) {
-        printf("Usage: %s <net_interface> port\n", argv[0]);
+    if (argc < 4) {
+        printf("Usage: %s <net_interface> port b|m\n", argv[0]);
         exit(0);
     }
 
-     assert(!pthread_mutex_init(&lock, NULL));
+    enum scope my_scope;
+    if (!strcmp(argv[3], "m")) {
+        my_scope = MULTICAST_MODE;
+        printf("Using multicast group: %s\n", CHAT_GROUP);
+    } else {
+        my_scope = BROADCAST_MODE;
+        puts("Using broadcast mode");
+    }
+
+    assert(!pthread_mutex_init(&lock, NULL));
 
     struct ifaddrs my_addr;
     if (get_int_info(&my_addr, argv[1]))
@@ -258,6 +294,8 @@ int main(int argc, char *argv[])
     struct listener_data data;
     data.my_addr = my_addr;
     data.port = portno;
+    data.my_scope = my_scope;
+    printf("Using port: %d\n", portno);
 
     printf("Enter you nickname(20 characters max): ");
     scanf("%s", nickname);
@@ -273,10 +311,15 @@ int main(int argc, char *argv[])
     init_socket(&sd, &data, SENDER);
     int n;
     struct sockaddr_in target;
-    target.sin_family = my_addr.ifa_ifu.ifu_broadaddr->sa_family;
     target.sin_port = htons(portno);
-    target.sin_addr.s_addr =
-        (&((struct sockaddr_in*)my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    if (my_scope == BROADCAST_MODE) {
+        target.sin_family = my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+        target.sin_addr.s_addr =
+            (&((struct sockaddr_in*)my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    } else {
+        target.sin_family = AF_INET;
+        target.sin_addr.s_addr = inet_addr(CHAT_GROUP);
+    }
     socklen_t targetlen = sizeof(struct sockaddr_in);
 
     while(1) {
