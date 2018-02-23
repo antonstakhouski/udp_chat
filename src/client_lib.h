@@ -19,11 +19,19 @@
 
 #include <netdb.h>
 
-#define BUF_SIZE 80
+#define BUF_SIZE 120
+#define MAX_USERS 20
 
 struct listener_data {
     struct ifaddrs my_addr;
     int port;
+};
+
+struct user_data {
+    sa_family_t sin_family;
+    in_addr_t sin_addr;
+    char nick[20];
+    time_t timestamp;
 };
 
 enum role {SENDER, RECEIVER};

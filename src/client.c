@@ -1,6 +1,9 @@
 #include "client_lib.h"
 
+char nickname[20];
+
 pthread_mutex_t lock;
+struct user_data users[MAX_USERS];
 
 void show_int_info(const struct ifaddrs* tempIfAddr)
 {
@@ -83,11 +86,14 @@ int init_socket(int* sd, const struct listener_data* data, enum role my_role)
         exit(0);
     }
 
-    int bcast = 1, reuse = 1;
+    int bcast = 1, reusep = 1, reusea = 1;
     if (setsockopt(*sd, SOL_SOCKET, SO_BROADCAST, (char *)&bcast, sizeof(bcast)))
         perror("Set socket options");
 
-    if (setsockopt(*sd, SOL_SOCKET, SO_REUSEPORT, (char *)&reuse, sizeof(reuse)))
+    if (setsockopt(*sd, SOL_SOCKET, SO_REUSEPORT, (char *)&reusep, sizeof(reusep)))
+        perror("Set socket options");
+
+    if (setsockopt(*sd, SOL_SOCKET, SO_REUSEADDR, (char *)&reusea, sizeof(reusea)))
         perror("Set socket options");
 
     struct sockaddr_in serv_addr;
@@ -108,26 +114,126 @@ int init_socket(int* sd, const struct listener_data* data, enum role my_role)
     return 0;
 }
 
+void show_users()
+{
+    puts("Users online:");
+    int cnt = 1;
+    time_t currtime = time(NULL);
+    char addressOutputBuffer[INET_ADDRSTRLEN];
+    struct tm* tm_info;
+    char buffer[26];
+    for(int i = 0; i < MAX_USERS; i++) {
+        if (users[i].sin_addr && currtime - users[i].timestamp <= 60) {
+            tm_info = localtime(&users[i].timestamp);
+            strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+            printf("%d. %s on %s. Last seen on %s\n", cnt, users[i].nick,
+                    inet_ntop(users[i].sin_family, &users[i].sin_addr,
+                        addressOutputBuffer, sizeof(struct sockaddr_in)),
+                    buffer);
+            cnt++;
+        }
+    }
+}
+
 void* listen_chat(void* arg)
 {
     struct listener_data data = *((struct listener_data*)arg);
-    int sd;
-    init_socket(&sd, &data, RECEIVER);
+    int listening_socket, sending_socket;
+    init_socket(&listening_socket, &data, RECEIVER);
+    init_socket(&sending_socket, &data, SENDER);
+
+    struct sockaddr_in target;
+    target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+    target.sin_port = htons(data.port);
+    target.sin_addr.s_addr =
+        (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    socklen_t targetlen = sizeof(struct sockaddr_in);
 
     pthread_mutex_lock(&lock);
     puts("----Connected to the chat----");
     pthread_mutex_unlock(&lock);
     char buffer[BUF_SIZE];
+    char pong_msg[30];
+    memset(pong_msg, 0, sizeof(pong_msg));
+    sprintf(pong_msg, "%s: PONG!\n", nickname);
     int n;
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(struct sockaddr_in);
+    char* msgptr;
+    char nick[20];
+
+    int found;
     while (1) {
         memset(buffer, 0, BUF_SIZE);
-        if ((n = recvfrom(sd, buffer, BUF_SIZE - 1, 0, (struct sockaddr *)&from,  &fromlen)) > 0) {
+        if ((n = recvfrom(listening_socket, buffer, BUF_SIZE - 1, 0, (struct sockaddr *)&from,  &fromlen)) > 0) {
+            msgptr = strstr(buffer, ":");
+            found = 0;
+            if (!strcmp(msgptr + 2, "PING!\n") || !strcmp(msgptr + 2, "PONG!\n")) {
+                memset(nick, 0, sizeof(nick));
+                strncpy(nick, buffer, msgptr - buffer);
+
+                for(int i = 0; i < MAX_USERS; i++) {
+                    if (users[i].sin_addr == from.sin_addr.s_addr) {
+                        strcpy(users[i].nick, nick);
+                        users[i].timestamp = time(NULL);
+                        found = 1;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    time_t currtime = time(NULL);
+                    for(int i = 0; i < MAX_USERS; i++) {
+                        if (users[i].sin_addr == 0 || currtime - users[i].timestamp > 60) {
+                            users[i].sin_family = from.sin_family;
+                            users[i].sin_addr = from.sin_addr.s_addr;
+                            strcpy(users[i].nick, nick);
+                            users[i].timestamp = currtime;
+                            found = 1;
+                            break;
+                        }
+                    }
+                }
+
+                if (!strcmp(msgptr + 2, "PING!\n")) {
+                    if ((n = sendto(sending_socket, pong_msg, strlen(pong_msg), 0, (struct sockaddr *)&target,  targetlen)) < 0) {
+                        perror("Error sending a message");
+                    }
+                }
+
+                continue;
+            }
             pthread_mutex_lock(&lock);
             printf("%s", buffer);
             pthread_mutex_unlock(&lock);
         }
+    }
+
+    return NULL;
+}
+
+void* do_ping(void* arg)
+{
+    struct listener_data data = *((struct listener_data*)arg);
+    int sd;
+    init_socket(&sd, &data, SENDER);
+
+    int n;
+    struct sockaddr_in target;
+    target.sin_family = data.my_addr.ifa_ifu.ifu_broadaddr->sa_family;
+    target.sin_port = htons(data.port);
+    target.sin_addr.s_addr =
+        (&((struct sockaddr_in*)data.my_addr.ifa_ifu.ifu_broadaddr)->sin_addr)->s_addr;
+    socklen_t targetlen = sizeof(struct sockaddr_in);
+
+    char msg[30];
+    memset(msg, 0, sizeof(msg));
+    sprintf(msg, "%s: PING!\n", nickname);
+    while(1) {
+        if ((n = sendto(sd, msg, strlen(msg), 0, (struct sockaddr *)&target,  targetlen)) < 0) {
+            perror("Error sending a message");
+        }
+        sleep(30);
     }
 
     return NULL;
@@ -153,14 +259,14 @@ int main(int argc, char *argv[])
     data.my_addr = my_addr;
     data.port = portno;
 
-    pthread_t listener;
-    pthread_create(&listener, NULL, &listen_chat, &data);
-
-    char nickname[20];
-    pthread_mutex_lock(&lock);
     printf("Enter you nickname(20 characters max): ");
     scanf("%s", nickname);
-    pthread_mutex_unlock(&lock);
+
+    memset(users, 0, sizeof(users));
+    pthread_t listener, pinger;
+    pthread_create(&listener, NULL, &listen_chat, &data);
+    pthread_create(&pinger, NULL, &do_ping, &data);
+
     char msg[80];
     char quote[120];
     int sd;
@@ -175,6 +281,10 @@ int main(int argc, char *argv[])
 
     while(1) {
         scanf("%s", msg);
+        if (!strcmp(msg, "/users")) {
+            show_users();
+            continue;
+        }
         memset(quote, 0, sizeof(quote));
         sprintf(quote, "%s: %s\n", nickname, msg);
         if ((n = sendto(sd, quote, strlen(quote), 0, (struct sockaddr *)&target,  targetlen)) < 0) {
